@@ -175,22 +175,10 @@ SHAPES = {
         "faces": square_pyramid_faces(),
         "fact": "면 5개 · 모서리 8개 · 꼭짓점 5개",
     },
-    "원기둥": {
-        "description": "직사각형 옆면을 둥글게 말고 위·아래 원을 붙여 만들어요.",
-        "faces": [],
-        "geometry": {"type": "cylinder", "radius": 1, "height": 2.4},
-        "fact": "면 3개 (곡면 1·원 2) · 모서리 2개 · 꼭짓점 0개",
-    },
-    "원뿔": {
-        "description": "부채꼴 옆면을 말고 원 모양 밑면을 붙여 만들어요.",
-        "faces": [],
-        "geometry": {"type": "cone", "radius": 1, "slant": 2.6, "height": 2.4},
-        "fact": "면 2개 (곡면 1·원 1) · 모서리 1개 · 꼭짓점 1개",
-    },
 }
 
 SHAPE_NAMES = list(SHAPES)
-POLYHEDRON_NAMES = [name for name in SHAPE_NAMES if not SHAPES[name].get("geometry")]
+POLYHEDRON_NAMES = SHAPE_NAMES
 PROBLEMS = {
     "문제 A": "정육면체",
     "문제 B": "삼각기둥",
@@ -206,7 +194,6 @@ def render_viewer(shape_name, base_face, mode, folded_reveal=True, fault="", fix
             "shapeName": shape_name,
             "baseFace": base_face,
             "mode": mode,
-            "geometry": SHAPES[shape_name].get("geometry"),
             "foldedReveal": folded_reveal,
             "fault": fault,
             "fixed": fixed,
@@ -284,13 +271,10 @@ def render_viewer(shape_name, base_face, mode, folded_reveal=True, fault="", fix
       let autoFold = false;
       let animationStart = 0;
       let lastStepAt = 0;
-      const isCurved = Boolean(options.geometry);
       const baseIndex = Math.max(0, faces.findIndex(f => f.name === options.baseFace));
-      const foldTree = isCurved ? [] : buildFoldTree(baseIndex);
+      const foldTree = buildFoldTree(baseIndex);
       const foldOrder = foldTree.slice(1).map(node => node.index);
-      const stepCount = isCurved
-        ? (options.geometry.type === "cylinder" ? 3 : 2)
-        : foldOrder.length;
+      const stepCount = foldOrder.length;
 
       function dot(a, b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
       function cross(a, b) {
@@ -343,7 +327,33 @@ def render_viewer(shape_name, base_face, mode, folded_reveal=True, fault="", fix
         if (tree.length !== faces.length) {
           throw new Error("전개도의 모든 면이 연결되어 있지 않습니다.");
         }
-        return tree;
+        const base = faces[root];
+        const baseNormal = cross(
+          subtract(base.target[1], base.target[0]),
+          subtract(base.target[2], base.target[0])
+        );
+        const baseCenter = average(base.target);
+        const opposite = tree.slice(1).find(node => {
+          if (tree.some(child => child.parent === node.index)) return false;
+          const other = faces[node.index];
+          const normal = cross(
+            subtract(other.target[1], other.target[0]),
+            subtract(other.target[2], other.target[0])
+          );
+          const alignment = Math.abs(dot(normal, baseNormal) / (norm(normal) * norm(baseNormal)));
+          return alignment > 0.98 && dot(subtract(average(other.target), baseCenter), baseNormal) < 0;
+        });
+        const ordered = [tree[0]];
+        function visit(parentIndex) {
+          tree.forEach(node => {
+            if (node.parent !== parentIndex || (opposite && node.index === opposite.index)) return;
+            ordered.push(node);
+            visit(node.index);
+          });
+        }
+        visit(root);
+        if (opposite) ordered.push(opposite);
+        return ordered;
       }
       function mapFaceToTarget(face, point) {
         const p0 = face.net[0], p1 = face.net[1], p2 = face.net[2];
@@ -411,7 +421,7 @@ def render_viewer(shape_name, base_face, mode, folded_reveal=True, fault="", fix
         return poses;
       }
       function foldProgressFor(index) {
-        if (animating && !isCurved && index === foldOrder[animatingStep]) return foldProgress;
+        if (animating && index === foldOrder[animatingStep]) return foldProgress;
         if (index === baseIndex) return 1;
         const position = foldOrder.indexOf(index);
         if (position < foldedCount) return 1;
@@ -497,135 +507,8 @@ def render_viewer(shape_name, base_face, mode, folded_reveal=True, fault="", fix
         }
       }
       function drawAll() {
-        if (isCurved) {
-          drawCurved("net");
-          if (options.foldedReveal) drawCurved("solid");
-          return;
-        }
         draw("net");
         if (options.foldedReveal) draw("solid");
-      }
-      function cylinderSidePoint(u, v, progress) {
-        const {radius, height} = options.geometry;
-        if (progress < 0.001) return [(u - 0.5) * 2 * Math.PI * radius, (v - 0.5) * height, 0];
-        const angle = 2 * Math.PI * progress * (u - 0.5);
-        const rollingRadius = radius / progress;
-        return [
-          rollingRadius * Math.sin(angle),
-          rollingRadius * (1 - Math.cos(angle)) - radius,
-          (v - 0.5) * height
-        ];
-      }
-      function coneSidePoint(u, v, progress) {
-        const {radius, slant, height} = options.geometry;
-        const sectorAngle = 2 * Math.PI * radius / slant;
-        const flatAngle = sectorAngle * (u - 0.5);
-        const distance = slant * v;
-        const flat = [distance * Math.sin(flatAngle), distance * Math.cos(flatAngle), 0];
-        const angle = 2 * Math.PI * (u - 0.5);
-        const rolled = [radius * v * Math.sin(angle), radius * v * Math.cos(angle), height * v];
-        return flat.map((value, i) => value * (1 - progress) + rolled[i] * progress);
-      }
-      function circlePoint(centerPoint, angle, radius) {
-        return [centerPoint[0] + radius * Math.cos(angle), centerPoint[1] + radius * Math.sin(angle), centerPoint[2]];
-      }
-      function drawCurved(kind) {
-        const canvas = document.getElementById(kind === "solid" ? "solidCanvas" : "netCanvas");
-        const ctx = canvas.getContext("2d");
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = "#fbfcff";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        const {type, radius, height, slant} = options.geometry;
-        const camera = cameras[kind];
-        const solid = kind === "solid";
-        const polygons = [];
-        const allPoints = [];
-        const addPolygon = (points, color) => {
-          polygons.push({points, color});
-          points.forEach(point => allPoints.push(point));
-        };
-        const aroundSegments = 48;
-        const sideProgress = solid ? 1 : stepProgressAt(0);
-
-        if (type === "cylinder") {
-          const verticalSegments = 5;
-          for (let i = 0; i < aroundSegments; i++) {
-            for (let j = 0; j < verticalSegments; j++) {
-              const u0 = i / aroundSegments, u1 = (i + 1) / aroundSegments;
-              const v0 = j / verticalSegments, v1 = (j + 1) / verticalSegments;
-              addPolygon([
-                cylinderSidePoint(u0, v0, sideProgress),
-                cylinderSidePoint(u1, v0, sideProgress),
-                cylinderSidePoint(u1, v1, sideProgress),
-                cylinderSidePoint(u0, v1, sideProgress)
-              ], i % 2 ? "#5389ef" : "#6b9af5");
-            }
-          }
-          const capInfo = [
-            {step: 1, z: height / 2, netY: height / 2 + radius + 0.4, color: "#f7a94b"},
-            {step: 2, z: -height / 2, netY: -height / 2 - radius - 0.4, color: "#37b99a"}
-          ];
-          capInfo.forEach(cap => {
-            const progress = solid ? 1 : stepProgressAt(cap.step);
-            const points = [];
-            for (let i = 0; i < aroundSegments; i++) {
-              const angle = 2 * Math.PI * i / aroundSegments;
-              const flat = circlePoint([0, cap.netY, 0], angle, radius);
-              const rolled = [radius * Math.sin(angle - Math.PI), -radius * Math.cos(angle - Math.PI), cap.z];
-              points.push(flat.map((value, axis) => value * (1 - progress) + rolled[axis] * progress));
-            }
-            addPolygon(points, cap.color);
-          });
-        } else {
-          const radialSegments = 14;
-          const slantHeight = slant;
-          for (let i = 0; i < aroundSegments; i++) {
-            for (let j = 0; j < radialSegments; j++) {
-              const u0 = i / aroundSegments, u1 = (i + 1) / aroundSegments;
-              const v0 = j / radialSegments, v1 = (j + 1) / radialSegments;
-              addPolygon([
-                coneSidePoint(u0, v0, sideProgress),
-                coneSidePoint(u1, v0, sideProgress),
-                coneSidePoint(u1, v1, sideProgress),
-                coneSidePoint(u0, v1, sideProgress)
-              ], i % 2 ? "#6386eb" : "#7999f3");
-            }
-          }
-          const baseProgress = solid ? 1 : stepProgressAt(1);
-          const netCenter = [0, -slantHeight - radius - 0.45, 0];
-          const points = [];
-          for (let i = 0; i < aroundSegments; i++) {
-            const angle = 2 * Math.PI * i / aroundSegments;
-            const flat = circlePoint(netCenter, angle, radius);
-            const target = [radius * Math.cos(angle), radius * Math.sin(angle), 0];
-            points.push(flat.map((value, axis) => value * (1 - baseProgress) + target[axis] * baseProgress));
-          }
-          addPolygon(points, "#f7a94b");
-        }
-
-        const origin = average(allPoints);
-        const scale = solid ? 150 : 63;
-        const projected = polygons.map(polygon => ({
-          points: polygon.points.map(point => project(point, camera, scale, origin)),
-          color: polygon.color
-        }));
-        projected.sort((a, b) =>
-          a.points.reduce((sum, point) => sum + point[2], 0) / a.points.length
-          - b.points.reduce((sum, point) => sum + point[2], 0) / b.points.length
-        );
-        projected.forEach(polygon => {
-          ctx.beginPath();
-          polygon.points.forEach((point, index) =>
-            index === 0 ? ctx.moveTo(point[0], point[1]) : ctx.lineTo(point[0], point[1])
-          );
-          ctx.closePath();
-          ctx.fillStyle = polygon.color;
-          ctx.fill();
-          ctx.strokeStyle = "#ffffff";
-          ctx.lineWidth = 1.2;
-          ctx.stroke();
-        });
       }
       function angleForNode(targetIndex) {
         const poses = [];
@@ -648,23 +531,6 @@ def render_viewer(shape_name, base_face, mode, folded_reveal=True, fault="", fix
           return;
         }
         const step = animating ? animatingStep : foldedCount;
-        if (isCurved) {
-          if (options.geometry.type === "cylinder") {
-            const notes = [
-              "1단계: 직사각형을 둥글게 말아요. 가로 길이는 밑면 원의 둘레(2πr)와 같아요.",
-              "2단계: 위쪽 원을 원기둥의 윗면에 붙여요.",
-              "3단계: 아래쪽 원을 밑면에 붙여 원기둥을 완성해요."
-            ];
-            netNote.textContent = notes[step] + " (" + foldedCount + " / " + stepCount + "단계 완료)";
-          } else {
-            const notes = [
-              "1단계: 부채꼴을 말아 양쪽 모선을 맞춰요. 호의 길이는 밑면 원둘레, 반지름은 옆선 길이예요.",
-              "2단계: 원을 붙여 원뿔의 밑면을 닫아요."
-            ];
-            netNote.textContent = notes[step] + " (" + foldedCount + " / " + stepCount + "단계 완료)";
-          }
-          return;
-        }
         const node = foldTree.find(item => item.index === foldOrder[step]);
         const angle = node ? angleForNode(node.index) : 0;
         const message = node
@@ -780,7 +646,6 @@ def render_viewer(shape_name, base_face, mode, folded_reveal=True, fault="", fix
       const foldButton = document.getElementById("foldAuto");
       const previousButton = document.getElementById("foldPrev");
       const unfoldButton = document.getElementById("unfold");
-      if (isCurved) nextButton.textContent = "다음 단계";
       updateStepNote();
       if (!options.foldedReveal) {
         nextButton.disabled = foldButton.disabled = previousButton.disabled = unfoldButton.disabled = true;
@@ -875,16 +740,12 @@ elif mode_label == "전개도 고치기":
     base_face = SHAPES[shape_name]["faces"][0]["name"]
 else:
     shape_name = st.sidebar.selectbox("도형 고르기", SHAPE_NAMES)
-    if SHAPES[shape_name].get("geometry"):
-        base_face = "옆면의 시작선을 고정"
-        st.sidebar.caption("옆면이 말릴 때 시작하는 선을 기준으로 고정해요.")
-    else:
-        base_face = st.sidebar.selectbox(
-            "기준 면",
-            [item["name"] for item in SHAPES[shape_name]["faces"]],
-            help="기준 면을 바꾸면 그 면을 밑면으로 삼아 입체를 살펴봅니다.",
-            key=f"base_{shape_name}",
-        )
+    base_face = st.sidebar.selectbox(
+        "기준 면",
+        [item["name"] for item in SHAPES[shape_name]["faces"]],
+        help="기준 면을 바꾸면 그 면을 밑면으로 삼아 입체를 살펴봅니다.",
+        key=f"base_{shape_name}",
+    )
 
 if mode_label == "도형 탐험":
     st.subheader(shape_name)
