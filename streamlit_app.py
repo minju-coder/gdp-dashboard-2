@@ -112,6 +112,7 @@ def triangular_prism_faces():
 
 
 def square_pyramid_faces():
+    side_height = (1 + (1.35 + 0.7) ** 2) ** 0.5
     base = [
         [-1, -1, -0.7],
         [1, -1, -0.7],
@@ -129,25 +130,25 @@ def square_pyramid_faces():
         face(
             "앞쪽 옆면",
             [base[0], base[1], apex],
-            [[-1, -1], [1, -1], [0, -2.55]],
+            [[-1, -1], [1, -1], [0, -1 - side_height]],
             COLORS[1],
         ),
         face(
             "오른쪽 옆면",
             [base[1], base[2], apex],
-            [[1, -1], [1, 1], [2.55, 0]],
+            [[1, -1], [1, 1], [1 + side_height, 0]],
             COLORS[2],
         ),
         face(
             "뒤쪽 옆면",
             [base[2], base[3], apex],
-            [[1, 1], [-1, 1], [0, 2.55]],
+            [[1, 1], [-1, 1], [0, 1 + side_height]],
             COLORS[3],
         ),
         face(
             "왼쪽 옆면",
             [base[3], base[0], apex],
-            [[-1, 1], [-1, -1], [-2.55, 0]],
+            [[-1, 1], [-1, -1], [-1 - side_height, 0]],
             COLORS[4],
         ),
     ]
@@ -174,9 +175,22 @@ SHAPES = {
         "faces": square_pyramid_faces(),
         "fact": "면 5개 · 모서리 8개 · 꼭짓점 5개",
     },
+    "원기둥": {
+        "description": "직사각형 옆면을 둥글게 말고 위·아래 원을 붙여 만들어요.",
+        "faces": [],
+        "geometry": {"type": "cylinder", "radius": 1, "height": 2.4},
+        "fact": "면 3개 (곡면 1·원 2) · 모서리 2개 · 꼭짓점 0개",
+    },
+    "원뿔": {
+        "description": "부채꼴 옆면을 말고 원 모양 밑면을 붙여 만들어요.",
+        "faces": [],
+        "geometry": {"type": "cone", "radius": 1, "slant": 2.6, "height": 2.4},
+        "fact": "면 2개 (곡면 1·원 1) · 모서리 1개 · 꼭짓점 1개",
+    },
 }
 
 SHAPE_NAMES = list(SHAPES)
+POLYHEDRON_NAMES = [name for name in SHAPE_NAMES if not SHAPES[name].get("geometry")]
 PROBLEMS = {
     "문제 A": "정육면체",
     "문제 B": "삼각기둥",
@@ -192,6 +206,7 @@ def render_viewer(shape_name, base_face, mode, folded_reveal=True, fault="", fix
             "shapeName": shape_name,
             "baseFace": base_face,
             "mode": mode,
+            "geometry": SHAPES[shape_name].get("geometry"),
             "foldedReveal": folded_reveal,
             "fault": fault,
             "fixed": fixed,
@@ -207,9 +222,10 @@ def render_viewer(shape_name, base_face, mode, folded_reveal=True, fault="", fix
           <button id="resetView">시점 초기화</button>
         </div>
         <div class="control-group">
+          <button id="foldPrev">이전 단계</button>
           <button id="foldNext" class="primary">다음 면 접기</button>
-          <button id="foldAuto">차례대로 접기</button>
-          <button id="unfold">모두 펼치기</button>
+          <button id="foldAuto">전체 재생</button>
+          <button id="unfold">처음부터</button>
         </div>
       </div>
       <div class="panels">
@@ -261,60 +277,153 @@ def render_viewer(shape_name, base_face, mode, folded_reveal=True, fault="", fix
       let foldedCount = 0;
       let foldProgress = 0;
       let animating = false;
+      let animationDirection = 1;
+      let animationFrom = 0;
+      let animationTo = 1;
+      let animatingStep = 0;
       let autoFold = false;
       let animationStart = 0;
       let lastStepAt = 0;
-      const colors = faces.map(f => f.color);
+      const isCurved = Boolean(options.geometry);
+      const baseIndex = Math.max(0, faces.findIndex(f => f.name === options.baseFace));
+      const foldTree = isCurved ? [] : buildFoldTree(baseIndex);
+      const foldOrder = foldTree.slice(1).map(node => node.index);
+      const stepCount = isCurved
+        ? (options.geometry.type === "cylinder" ? 3 : 2)
+        : foldOrder.length;
 
       function dot(a, b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
       function cross(a, b) {
         return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
       }
       function norm(v) { return Math.hypot(v[0], v[1], v[2]) || 1; }
-      function rotateToBase(point, face) {
-        if (!face || face.target.length < 3) return point;
-        const a = face.target[0], b = face.target[1], c = face.target[2];
-        const u = [b[0]-a[0], b[1]-a[1], b[2]-a[2]];
-        const v = [c[0]-a[0], c[1]-a[1], c[2]-a[2]];
-        let n = cross(u, v);
-        const nl = norm(n);
-        n = n.map(x => x / nl);
-        const down = [0, 0, -1];
-        const axis = cross(n, down);
-        const al = Math.hypot(axis[0], axis[1], axis[2]);
-        const d = Math.max(-1, Math.min(1, dot(n, down)));
-        if (al < 1e-7) {
-          if (d > 0) return point;
-          return [point[0], -point[1], -point[2]];
+      function add(a, b) { return a.map((value, i) => value + b[i]); }
+      function subtract(a, b) { return a.map((value, i) => value - b[i]); }
+      function scaleVector(a, amount) { return a.map(value => value * amount); }
+      function average(points) {
+        return points.reduce((sum, point) => add(sum, point), [0, 0, 0]).map(value => value / points.length);
+      }
+      function samePoint(a, b) {
+        return Math.abs(a[0] - b[0]) < 1e-4 && Math.abs(a[1] - b[1]) < 1e-4;
+      }
+      function sharedEdges(a, b) {
+        const matches = [];
+        a.net.forEach((start, edgeA) => {
+          const end = a.net[(edgeA + 1) % a.net.length];
+          b.net.forEach((otherStart, edgeB) => {
+            const otherEnd = b.net[(edgeB + 1) % b.net.length];
+            if (samePoint(start, otherEnd) && samePoint(end, otherStart)) {
+              matches.push({edgeA, edgeB, reversed: true});
+            } else if (samePoint(start, otherStart) && samePoint(end, otherEnd)) {
+              matches.push({edgeA, edgeB, reversed: false});
+            }
+          });
+        });
+        return matches;
+      }
+      function buildFoldTree(root) {
+        const tree = [{index: root, parent: -1, edgeParent: -1, edgeChild: -1}];
+        const visited = new Set([root]);
+        for (let cursor = 0; cursor < tree.length; cursor++) {
+          const parent = tree[cursor];
+          faces.forEach((childFace, childIndex) => {
+            if (visited.has(childIndex)) return;
+            const edges = sharedEdges(faces[parent.index], childFace);
+            if (!edges.length) return;
+            const edge = edges[0];
+            visited.add(childIndex);
+            tree.push({
+              index: childIndex,
+              parent: parent.index,
+              edgeParent: edge.edgeA,
+              edgeChild: edge.edgeB
+            });
+          });
         }
-        const k = axis.map(x => x / al);
-        const angle = Math.acos(d);
-        const cos = Math.cos(angle), sin = Math.sin(angle);
-        const kp = cross(k, point);
-        const kd = dot(k, point) * (1 - cos);
-        return [
-          point[0]*cos + kp[0]*sin + k[0]*kd,
-          point[1]*cos + kp[1]*sin + k[1]*kd,
-          point[2]*cos + kp[2]*sin + k[2]*kd
-        ];
+        if (tree.length !== faces.length) {
+          throw new Error("전개도의 모든 면이 연결되어 있지 않습니다.");
+        }
+        return tree;
       }
-      function orderForBase() {
-        const index = Math.max(0, faces.findIndex(f => f.name === options.baseFace));
-        return [index, ...faces.map((_, i) => i).filter(i => i !== index)];
+      function mapFaceToTarget(face, point) {
+        const p0 = face.net[0], p1 = face.net[1], p2 = face.net[2];
+        const t0 = face.target[0], t1 = face.target[1], t2 = face.target[2];
+        const ux = p1[0] - p0[0], uy = p1[1] - p0[1];
+        const vx = p2[0] - p0[0], vy = p2[1] - p0[1];
+        const determinant = ux * vy - uy * vx;
+        const dx = point[0] - p0[0], dy = point[1] - p0[1];
+        const a = (dx * vy - dy * vx) / determinant;
+        const b = (ux * dy - uy * dx) / determinant;
+        return add(t0, add(scaleVector(subtract(t1, t0), a), scaleVector(subtract(t2, t0), b)));
       }
-      function stateFor(index, order) {
-        const position = order.indexOf(index);
+      function rotateAroundAxis(point, start, end, angle) {
+        const axis = scaleVector(subtract(end, start), 1 / norm(subtract(end, start)));
+        const relative = subtract(point, start);
+        const cosine = Math.cos(angle), sine = Math.sin(angle);
+        return add(start, add(
+          add(scaleVector(relative, cosine), scaleVector(cross(axis, relative), sine)),
+          scaleVector(axis, dot(axis, relative) * (1 - cosine))
+        ));
+      }
+      function foldAngle(parentPose, node) {
+        const parentFace = faces[node.parent];
+        const childFace = faces[node.index];
+        const a = parentFace.net[node.edgeParent];
+        const b = parentFace.net[(node.edgeParent + 1) % parentFace.net.length];
+        const start = parentPose(a), end = parentPose(b);
+        const axis = scaleVector(subtract(end, start), 1 / norm(subtract(end, start)));
+        const hingeMidpoint = scaleVector(add(start, end), 0.5);
+        const sourceCenter = parentPose(average(childFace.net.map(point => [point[0], point[1], 0])).slice(0, 2));
+        const targetCenter = average(childFace.target);
+        let sourceRadial = subtract(sourceCenter, hingeMidpoint);
+        let targetRadial = subtract(targetCenter, hingeMidpoint);
+        sourceRadial = subtract(sourceRadial, scaleVector(axis, dot(sourceRadial, axis)));
+        targetRadial = subtract(targetRadial, scaleVector(axis, dot(targetRadial, axis)));
+        const cosine = Math.max(-1, Math.min(1, dot(sourceRadial, targetRadial) / (norm(sourceRadial) * norm(targetRadial))));
+        const sine = dot(axis, cross(sourceRadial, targetRadial)) / (norm(sourceRadial) * norm(targetRadial));
+        return Math.atan2(sine, cosine);
+      }
+      function makeFoldPoses(progressByFace) {
+        const fullPoses = [];
+        const angles = [];
+        const baseFace = faces[baseIndex];
+        fullPoses[baseIndex] = point => mapFaceToTarget(baseFace, point);
+        foldTree.slice(1).forEach(node => {
+          const parentPose = fullPoses[node.parent];
+          const angle = foldAngle(parentPose, node);
+          const parentFace = faces[node.parent];
+          const start = parentPose(parentFace.net[node.edgeParent]);
+          const end = parentPose(parentFace.net[(node.edgeParent + 1) % parentFace.net.length]);
+          angles[node.index] = angle;
+          fullPoses[node.index] = point => rotateAroundAxis(parentPose(point), start, end, angle);
+        });
+
+        const poses = [];
+        poses[baseIndex] = fullPoses[baseIndex];
+        foldTree.slice(1).forEach(node => {
+          const parentPose = poses[node.parent];
+          const parentFace = faces[node.parent];
+          const start = parentPose(parentFace.net[node.edgeParent]);
+          const end = parentPose(parentFace.net[(node.edgeParent + 1) % parentFace.net.length]);
+          const angle = angles[node.index] * progressByFace[node.index];
+          poses[node.index] = point => rotateAroundAxis(parentPose(point), start, end, angle);
+        });
+        return poses;
+      }
+      function foldProgressFor(index) {
+        if (animating && !isCurved && index === foldOrder[animatingStep]) return foldProgress;
+        if (index === baseIndex) return 1;
+        const position = foldOrder.indexOf(index);
         if (position < foldedCount) return 1;
-        if (position === foldedCount) return foldProgress;
         return 0;
       }
-      function faceNet(face, index) {
-        if (options.fault === "overlap" && !options.fixed && index === faces.length - 1) {
-          return faces[0].net;
-        }
-        return face.net;
+      function stepProgressAt(step) {
+        if (animating && animatingStep === step) return foldProgress;
+        return step < foldedCount ? 1 : 0;
       }
-      function project(point, camera, scale) {
+      function project(point, camera, scale, origin) {
+        origin = origin || [0, 0, 0];
+        point = subtract(point, origin);
         const cy = Math.cos(camera.yaw), sy = Math.sin(camera.yaw);
         const cp = Math.cos(camera.pitch), sp = Math.sin(camera.pitch);
         const x1 = point[0]*cy - point[1]*sy;
@@ -330,33 +439,35 @@ def render_viewer(shape_name, base_face, mode, folded_reveal=True, fault="", fix
         ctx.fillStyle = "#fbfcff";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         const camera = cameras[kind];
-        const base = faces.find(f => f.name === options.baseFace);
-        const order = orderForBase();
+        const progressByFace = faces.map((_, index) => foldProgressFor(index));
+        const foldPoses = makeFoldPoses(progressByFace);
         const items = [];
+        const allPoints = [];
         let maxExtent = 0;
         faces.forEach((face, index) => {
           if (kind === "net" && options.fault === "missing" && !options.fixed && index === faces.length - 1) return;
-          const progress = kind === "solid" ? 1 : stateFor(index, order);
-          const net = faceNet(face, index);
-          const points = face.target.map((point, i) => {
-            const folded = rotateToBase(point, base);
-            return [
-              net[i][0]*(1-progress) + folded[0]*progress,
-              net[i][1]*(1-progress) + folded[1]*progress,
-              folded[2]*progress
-            ];
-          });
+          const progress = kind === "solid" ? 1 : progressByFace[index];
+          let points = kind === "solid"
+            ? face.target
+            : face.net.map(point => foldPoses[index]([point[0], point[1], 0]));
+          if (kind === "net" && options.fault === "overlap" && !options.fixed && index === faces.length - 1 && progress < 0.01) {
+            const centerOfFace = average(points);
+            const centerOfFirst = average(faces[0].net.map(point => foldPoses[0]([point[0], point[1], 0])));
+            points = points.map(point => add(point, subtract(centerOfFirst, centerOfFace)));
+          }
+          points.forEach(p => allPoints.push(p));
           points.forEach(p => { maxExtent = Math.max(maxExtent, Math.abs(p[0]), Math.abs(p[1]), Math.abs(p[2])); });
           const projected = points.map(p => project(p, camera, 1));
           const averageDepth = projected.reduce((sum, p) => sum + p[2], 0) / projected.length;
           items.push({face, index, progress, points, projected, averageDepth});
         });
+        const origin = average(allPoints);
         const scale = kind === "solid"
           ? Math.min(145, 245 / Math.max(1.7, maxExtent))
           : Math.min(106, 250 / Math.max(2.5, maxExtent));
         items.sort((a, b) => a.averageDepth - b.averageDepth);
         items.forEach(item => {
-          const points = item.points.map(p => project(p, camera, scale));
+          const points = item.points.map(p => project(p, camera, scale, origin));
           ctx.beginPath();
           points.forEach((p, i) => i === 0 ? ctx.moveTo(p[0], p[1]) : ctx.lineTo(p[0], p[1]));
           ctx.closePath();
@@ -386,8 +497,181 @@ def render_viewer(shape_name, base_face, mode, folded_reveal=True, fault="", fix
         }
       }
       function drawAll() {
+        if (isCurved) {
+          drawCurved("net");
+          if (options.foldedReveal) drawCurved("solid");
+          return;
+        }
         draw("net");
         if (options.foldedReveal) draw("solid");
+      }
+      function cylinderSidePoint(u, v, progress) {
+        const {radius, height} = options.geometry;
+        if (progress < 0.001) return [(u - 0.5) * 2 * Math.PI * radius, (v - 0.5) * height, 0];
+        const angle = 2 * Math.PI * progress * (u - 0.5);
+        const rollingRadius = radius / progress;
+        return [
+          rollingRadius * Math.sin(angle),
+          rollingRadius * (1 - Math.cos(angle)) - radius,
+          (v - 0.5) * height
+        ];
+      }
+      function coneSidePoint(u, v, progress) {
+        const {radius, slant, height} = options.geometry;
+        const sectorAngle = 2 * Math.PI * radius / slant;
+        const flatAngle = sectorAngle * (u - 0.5);
+        const distance = slant * v;
+        const flat = [distance * Math.sin(flatAngle), distance * Math.cos(flatAngle), 0];
+        const angle = 2 * Math.PI * (u - 0.5);
+        const rolled = [radius * v * Math.sin(angle), radius * v * Math.cos(angle), height * v];
+        return flat.map((value, i) => value * (1 - progress) + rolled[i] * progress);
+      }
+      function circlePoint(centerPoint, angle, radius) {
+        return [centerPoint[0] + radius * Math.cos(angle), centerPoint[1] + radius * Math.sin(angle), centerPoint[2]];
+      }
+      function drawCurved(kind) {
+        const canvas = document.getElementById(kind === "solid" ? "solidCanvas" : "netCanvas");
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#fbfcff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        const {type, radius, height, slant} = options.geometry;
+        const camera = cameras[kind];
+        const solid = kind === "solid";
+        const polygons = [];
+        const allPoints = [];
+        const addPolygon = (points, color) => {
+          polygons.push({points, color});
+          points.forEach(point => allPoints.push(point));
+        };
+        const aroundSegments = 48;
+        const sideProgress = solid ? 1 : stepProgressAt(0);
+
+        if (type === "cylinder") {
+          const verticalSegments = 5;
+          for (let i = 0; i < aroundSegments; i++) {
+            for (let j = 0; j < verticalSegments; j++) {
+              const u0 = i / aroundSegments, u1 = (i + 1) / aroundSegments;
+              const v0 = j / verticalSegments, v1 = (j + 1) / verticalSegments;
+              addPolygon([
+                cylinderSidePoint(u0, v0, sideProgress),
+                cylinderSidePoint(u1, v0, sideProgress),
+                cylinderSidePoint(u1, v1, sideProgress),
+                cylinderSidePoint(u0, v1, sideProgress)
+              ], i % 2 ? "#5389ef" : "#6b9af5");
+            }
+          }
+          const capInfo = [
+            {step: 1, z: height / 2, netY: height / 2 + radius + 0.4, color: "#f7a94b"},
+            {step: 2, z: -height / 2, netY: -height / 2 - radius - 0.4, color: "#37b99a"}
+          ];
+          capInfo.forEach(cap => {
+            const progress = solid ? 1 : stepProgressAt(cap.step);
+            const points = [];
+            for (let i = 0; i < aroundSegments; i++) {
+              const angle = 2 * Math.PI * i / aroundSegments;
+              const flat = circlePoint([0, cap.netY, 0], angle, radius);
+              const rolled = [radius * Math.sin(angle - Math.PI), -radius * Math.cos(angle - Math.PI), cap.z];
+              points.push(flat.map((value, axis) => value * (1 - progress) + rolled[axis] * progress));
+            }
+            addPolygon(points, cap.color);
+          });
+        } else {
+          const radialSegments = 14;
+          const slantHeight = slant;
+          for (let i = 0; i < aroundSegments; i++) {
+            for (let j = 0; j < radialSegments; j++) {
+              const u0 = i / aroundSegments, u1 = (i + 1) / aroundSegments;
+              const v0 = j / radialSegments, v1 = (j + 1) / radialSegments;
+              addPolygon([
+                coneSidePoint(u0, v0, sideProgress),
+                coneSidePoint(u1, v0, sideProgress),
+                coneSidePoint(u1, v1, sideProgress),
+                coneSidePoint(u0, v1, sideProgress)
+              ], i % 2 ? "#6386eb" : "#7999f3");
+            }
+          }
+          const baseProgress = solid ? 1 : stepProgressAt(1);
+          const netCenter = [0, -slantHeight - radius - 0.45, 0];
+          const points = [];
+          for (let i = 0; i < aroundSegments; i++) {
+            const angle = 2 * Math.PI * i / aroundSegments;
+            const flat = circlePoint(netCenter, angle, radius);
+            const target = [radius * Math.cos(angle), radius * Math.sin(angle), 0];
+            points.push(flat.map((value, axis) => value * (1 - baseProgress) + target[axis] * baseProgress));
+          }
+          addPolygon(points, "#f7a94b");
+        }
+
+        const origin = average(allPoints);
+        const scale = solid ? 150 : 63;
+        const projected = polygons.map(polygon => ({
+          points: polygon.points.map(point => project(point, camera, scale, origin)),
+          color: polygon.color
+        }));
+        projected.sort((a, b) =>
+          a.points.reduce((sum, point) => sum + point[2], 0) / a.points.length
+          - b.points.reduce((sum, point) => sum + point[2], 0) / b.points.length
+        );
+        projected.forEach(polygon => {
+          ctx.beginPath();
+          polygon.points.forEach((point, index) =>
+            index === 0 ? ctx.moveTo(point[0], point[1]) : ctx.lineTo(point[0], point[1])
+          );
+          ctx.closePath();
+          ctx.fillStyle = polygon.color;
+          ctx.fill();
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = 1.2;
+          ctx.stroke();
+        });
+      }
+      function angleForNode(targetIndex) {
+        const poses = [];
+        poses[baseIndex] = point => mapFaceToTarget(faces[baseIndex], point);
+        for (const node of foldTree.slice(1)) {
+          const parentPose = poses[node.parent];
+          const angle = foldAngle(parentPose, node);
+          if (node.index === targetIndex) return Math.round(Math.abs(angle) * 180 / Math.PI);
+          const parentFace = faces[node.parent];
+          const start = parentPose(parentFace.net[node.edgeParent]);
+          const end = parentPose(parentFace.net[(node.edgeParent + 1) % parentFace.net.length]);
+          poses[node.index] = point => rotateAroundAxis(parentPose(point), start, end, angle);
+        }
+        return 90;
+      }
+      function updateStepNote() {
+        if (!netNote || (options.fault && !options.fixed)) return;
+        if (foldedCount >= stepCount && !animating) {
+          netNote.textContent = "완성! 전개도의 면이 모두 제자리에 모였어요.";
+          return;
+        }
+        const step = animating ? animatingStep : foldedCount;
+        if (isCurved) {
+          if (options.geometry.type === "cylinder") {
+            const notes = [
+              "1단계: 직사각형을 둥글게 말아요. 가로 길이는 밑면 원의 둘레(2πr)와 같아요.",
+              "2단계: 위쪽 원을 원기둥의 윗면에 붙여요.",
+              "3단계: 아래쪽 원을 밑면에 붙여 원기둥을 완성해요."
+            ];
+            netNote.textContent = notes[step] + " (" + foldedCount + " / " + stepCount + "단계 완료)";
+          } else {
+            const notes = [
+              "1단계: 부채꼴을 말아 양쪽 모선을 맞춰요. 호의 길이는 밑면 원둘레, 반지름은 옆선 길이예요.",
+              "2단계: 원을 붙여 원뿔의 밑면을 닫아요."
+            ];
+            netNote.textContent = notes[step] + " (" + foldedCount + " / " + stepCount + "단계 완료)";
+          }
+          return;
+        }
+        const node = foldTree.find(item => item.index === foldOrder[step]);
+        const angle = node ? angleForNode(node.index) : 0;
+        const message = node
+          ? (step + 1) + "단계: " + faces[node.index].name + "을(를) " + faces[node.parent].name
+            + "과 만나는 변을 축으로 안쪽으로 " + angle + "° 접어요."
+          : "기준 면 " + options.baseFace + "은 움직이지 않아요.";
+        netNote.textContent = message + " (" + foldedCount + " / " + stepCount + "단계 완료)";
       }
       function resetCamera() {
         cameras.solid = {yaw: -0.72, pitch: 0.48};
@@ -396,28 +680,47 @@ def render_viewer(shape_name, base_face, mode, folded_reveal=True, fault="", fix
       function animate(now) {
         if (animating) {
           const t = Math.min(1, (now - animationStart) / 720);
-          foldProgress = t*t*(3-2*t);
+          const eased = t*t*(3-2*t);
+          foldProgress = animationFrom + (animationTo - animationFrom) * eased;
           if (t >= 1) {
-            foldedCount += 1;
+            foldedCount = animationDirection > 0 ? animatingStep + 1 : animatingStep;
             foldProgress = 0;
             animating = false;
             lastStepAt = now;
           }
         }
-        if (autoFold && !animating && foldedCount < faces.length && now - lastStepAt > 280) {
+        if (autoFold && !animating && foldedCount < stepCount && now - lastStepAt > 280) {
           startNext();
         }
-        if (netNote && !(options.fault && !options.fixed)) {
-          netNote.textContent = "접힌 면: " + foldedCount + " / " + faces.length + " · 기준 면: " + options.baseFace;
-        }
+        updateStepNote();
         drawAll();
         requestAnimationFrame(animate);
       }
       function startNext() {
-        if (foldedCount >= faces.length || animating) {
-          if (foldedCount >= faces.length) autoFold = false;
+        if (foldedCount >= stepCount || animating) {
+          if (foldedCount >= stepCount) autoFold = false;
           return;
         }
+        animatingStep = foldedCount;
+        animationDirection = 1;
+        animationFrom = 0;
+        animationTo = 1;
+        foldProgress = 0;
+        animationStart = performance.now();
+        animating = true;
+      }
+      function startPrevious() {
+        autoFold = false;
+        if (animating) {
+          animating = false;
+          foldProgress = 0;
+        }
+        if (foldedCount <= 0) return;
+        animatingStep = foldedCount - 1;
+        animationDirection = -1;
+        animationFrom = 1;
+        animationTo = 0;
+        foldProgress = 1;
         animationStart = performance.now();
         animating = true;
       }
@@ -430,10 +733,11 @@ def render_viewer(shape_name, base_face, mode, folded_reveal=True, fault="", fix
         cameras.solid.yaw = cameras.net.yaw = 0;
       };
       document.getElementById("resetView").onclick = resetCamera;
+      document.getElementById("foldPrev").onclick = startPrevious;
       document.getElementById("foldNext").onclick = () => { autoFold = false; startNext(); };
       document.getElementById("foldAuto").onclick = () => { autoFold = true; startNext(); };
       document.getElementById("unfold").onclick = () => {
-        autoFold = false; animating = false; foldedCount = 0; foldProgress = 0;
+        autoFold = false; animating = false; foldedCount = 0; foldProgress = 0; resetCamera();
       };
       ["solid", "net"].forEach(kind => {
         const canvas = document.getElementById(kind === "solid" ? "solidCanvas" : "netCanvas");
@@ -474,9 +778,12 @@ def render_viewer(shape_name, base_face, mode, folded_reveal=True, fault="", fix
       }
       const nextButton = document.getElementById("foldNext");
       const foldButton = document.getElementById("foldAuto");
+      const previousButton = document.getElementById("foldPrev");
       const unfoldButton = document.getElementById("unfold");
+      if (isCurved) nextButton.textContent = "다음 단계";
+      updateStepNote();
       if (!options.foldedReveal) {
-        nextButton.disabled = foldButton.disabled = unfoldButton.disabled = true;
+        nextButton.disabled = foldButton.disabled = previousButton.disabled = unfoldButton.disabled = true;
       }
       requestAnimationFrame(animate);
     </script>
@@ -533,7 +840,7 @@ if mode_label == "거꾸로 추리하기":
     problem = st.sidebar.selectbox("전개도 문제", list(PROBLEMS))
     shape_name = PROBLEMS[problem]
     st.sidebar.caption("입체도형을 보기 전에 전개도의 면 모양과 연결을 살펴보세요.")
-    guess = st.sidebar.selectbox("어떤 도형이 될까요?", SHAPE_NAMES, key=f"guess_{problem}")
+    guess = st.sidebar.selectbox("어떤 도형이 될까요?", POLYHEDRON_NAMES, key=f"guess_{problem}")
     if st.sidebar.button("내 추리 확인", type="primary", use_container_width=True):
         st.session_state[f"guess_checked_{problem}"] = guess == shape_name
         st.session_state[f"guess_answered_{problem}"] = True
@@ -545,7 +852,7 @@ if mode_label == "거꾸로 추리하기":
     folded_reveal = checked and st.session_state.get(f"guess_checked_{problem}", False)
     base_face = SHAPES[shape_name]["faces"][0]["name"]
 elif mode_label == "전개도 고치기":
-    shape_name = st.sidebar.selectbox("도형 고르기", SHAPE_NAMES, key="fix_shape")
+    shape_name = st.sidebar.selectbox("도형 고르기", POLYHEDRON_NAMES, key="fix_shape")
     fault_label = st.sidebar.radio(
         "전개도의 오류",
         ["빠진 면 찾기", "겹친 면 옮기기"],
@@ -568,12 +875,16 @@ elif mode_label == "전개도 고치기":
     base_face = SHAPES[shape_name]["faces"][0]["name"]
 else:
     shape_name = st.sidebar.selectbox("도형 고르기", SHAPE_NAMES)
-    base_face = st.sidebar.selectbox(
-        "기준 면",
-        [item["name"] for item in SHAPES[shape_name]["faces"]],
-        help="기준 면을 바꾸면 그 면을 밑면으로 삼아 입체를 살펴봅니다.",
-        key=f"base_{shape_name}",
-    )
+    if SHAPES[shape_name].get("geometry"):
+        base_face = "옆면의 시작선을 고정"
+        st.sidebar.caption("옆면이 말릴 때 시작하는 선을 기준으로 고정해요.")
+    else:
+        base_face = st.sidebar.selectbox(
+            "기준 면",
+            [item["name"] for item in SHAPES[shape_name]["faces"]],
+            help="기준 면을 바꾸면 그 면을 밑면으로 삼아 입체를 살펴봅니다.",
+            key=f"base_{shape_name}",
+        )
 
 if mode_label == "도형 탐험":
     st.subheader(shape_name)
@@ -604,7 +915,7 @@ with right:
     st.markdown("#### 이번 탐구")
     if mode_label == "도형 탐험":
         st.write("1. 마우스로 입체와 전개도를 각각 돌려 봅니다.")
-        st.write("2. **다음 면 접기**를 눌러 면이 만나는 순서를 확인합니다.")
+        st.write("2. **다음 단계**와 **이전 단계**로 접히는 순서를 확인합니다.")
         st.write("3. 위에서 보기와 정면 보기로 모양을 비교합니다.")
         if st.button("이 도형을 내 도감에 기록", type="primary", use_container_width=True):
             entry = {"shape": shape_name, "base": base_face, "fact": SHAPES[shape_name]["fact"]}
